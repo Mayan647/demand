@@ -3,3 +3,4 @@ pandas
 matplotlib
 openpyxl
 statsmodels
+XlsxWriter>=3.0.0
