@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from lightgbm import LGBMRegressor
 from io import BytesIO
 
-st.set_page_config(page_title="Monthly Item-wise Demand Forecasting", layout="centered")
-st.title("📦 Monthly Demand Forecasting (Holt-Winters)")
+st.set_page_config(page_title="ML-Based Monthly Forecast", layout="centered")
+st.title("🤖 LightGBM Forecasting (Monthly Data Input)")
 
 uploaded_file = st.file_uploader("Upload Excel with: Date, Item Code, Demand", type=["xlsx"])
 
@@ -22,64 +21,75 @@ if uploaded_file:
             df['Month'] = df['Date'].dt.to_period('M').dt.to_timestamp()
             monthly_df = df.groupby(['Month', 'Item Code'])['Demand'].sum().reset_index()
 
-            forecast_horizon = 5  # months
-            result = {}
+            forecast_results = []
             skipped_items = []
 
             for item in monthly_df['Item Code'].unique():
                 item_df = monthly_df[monthly_df['Item Code'] == item].copy()
-                item_df.set_index('Month', inplace=True)
+                item_df = item_df.sort_values('Month').reset_index(drop=True)
 
-                if len(item_df) < 2:
+                if len(item_df) < 6:
                     skipped_items.append(item)
                     continue
 
-                try:
-                    if len(item_df) >= 24:
-                        model = ExponentialSmoothing(
-                            item_df['Demand'],
-                            trend='add',
-                            seasonal='add',
-                            seasonal_periods=12
-                        ).fit()
-                    else:
-                        model = ExponentialSmoothing(
-                            item_df['Demand'],
-                            trend='add'
-                        ).fit()
+                # Create lag features
+                item_df['Lag1'] = item_df['Demand'].shift(1)
+                item_df['Lag2'] = item_df['Demand'].shift(2)
+                item_df['Lag3'] = item_df['Demand'].shift(3)
+                item_df = item_df.dropna().reset_index(drop=True)
 
-                    forecast = model.forecast(forecast_horizon)
-                    forecast.index = forecast.index.to_period('M').to_timestamp()
-                    result[item] = forecast
-
-                except Exception as e:
+                if len(item_df) < 3:
                     skipped_items.append(item)
+                    continue
 
-            if not result:
-                st.error("❌ No items could be forecasted. Please upload more data.")
+                X = item_df[['Lag1', 'Lag2', 'Lag3']]
+                y = item_df['Demand']
+                model = LGBMRegressor()
+                model.fit(X, y)
+
+                # Rolling forecast
+                lags = item_df.iloc[-1][['Lag1', 'Lag2', 'Lag3']].tolist()
+                forecast = []
+                months = []
+
+                last_month = item_df['Month'].max()
+
+                for i in range(5):
+                    pred = model.predict([lags])[0]
+                    forecast.append(pred)
+                    last_month += pd.offsets.MonthBegin(1)
+                    months.append(last_month)
+                    lags = [pred] + lags[:2]  # update lags
+
+                forecast_results.append(pd.DataFrame({
+                    'Item Name': [item],
+                    **{month.strftime('%B %Y'): [val] for month, val in zip(months, forecast)}
+                }))
+
+            if not forecast_results:
+                st.error("❌ No forecastable items found.")
             else:
-                forecast_df = pd.DataFrame(result).T
-                forecast_df.columns = [col.strftime('%B %Y') for col in forecast_df.columns]
-                forecast_df.index.name = 'Item Name'
+                result_df = pd.concat(forecast_results, ignore_index=True)
 
+                # Downloadable Excel
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    forecast_df.to_excel(writer, sheet_name='Forecast')
+                    result_df.to_excel(writer, index=False, sheet_name='Forecast')
                 output.seek(0)
 
                 st.download_button(
                     label="📥 Download Forecast Excel",
                     data=output,
-                    file_name="item_wise_monthly_forecast.xlsx",
+                    file_name="ml_item_forecast.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-                st.success("✅ Forecast ready! Download using the button above.")
+                st.dataframe(result_df)
 
             if skipped_items:
-                st.warning(f"⚠️ Skipped {len(skipped_items)} item(s) due to insufficient data: {', '.join(skipped_items)}")
+                st.warning(f"⚠️ Skipped items due to insufficient data: {', '.join(skipped_items)}")
 
     except Exception as e:
         st.error(f"❌ Error: {e}")
 else:
-    st.info("Upload an Excel file to get started.")
+    st.info("Upload a monthly Excel file to begin forecasting.")
